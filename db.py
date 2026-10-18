@@ -1,4 +1,4 @@
-﻿import asyncpg
+import asyncpg
 from typing import Any, List, Optional, Dict
 import config
 
@@ -17,8 +17,8 @@ async def init_pool() -> asyncpg.Pool:
         _pool = await asyncpg.create_pool(
             dsn=clean_dsn,
             ssl="require",
-            min_size=1,
-            max_size=10,
+            min_size=0,
+            max_size=5,
             command_timeout=30,
         )
         print("Connected to Neon PostgreSQL pool.")

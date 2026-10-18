@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import uuid
 import datetime
 import json
@@ -21,6 +21,7 @@ mcp = FastMCP(
     name=config.MCP_SERVER_NAME,
     host=config.HOST,
     port=config.PORT,
+    stateless_http=True,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,10 +219,11 @@ async def root_dashboard(request: Request):
             <div class="endpoints">
                 <p><strong>Endpoints:</strong></p>
                 <ul>
-                    <li>Claude Desktop / Native MCP: <code>/sse</code></li>
+                    <li>Streamable HTTP (MCP): <code>POST /mcp</code></li>
                     <li>ChatGPT Action Schema: <a href="/openapi.json"><code>/openapi.json</code></a></li>
-                    <li>Tasks API: <a href="/api/tasks"><code>/api/tasks</code></a></li>
-                    <li>Summary API: <a href="/api/summary"><code>/api/summary</code></a></li>
+                    <li>Tasks REST API: <a href="/api/tasks"><code>/api/tasks</code></a></li>
+                    <li>Workspace Summary: <a href="/api/summary"><code>/api/summary</code></a></li>
+                    <li>Daily Reminders: <code>POST /api/reminders</code></li>
                 </ul>
             </div>
         </div>
@@ -328,6 +330,38 @@ async def openapi_schema(request: Request):
                     }
                 }
             },
+            "/api/tasks/status": {
+                "post": {
+                    "operationId": "updateTaskStatus",
+                    "summary": "Update task progress status",
+                    "description": "Transitions task status (e.g. backlog, todo, in_progress, in_review, done) by ID or taskNumber (e.g. TF-001).",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task_id": {"type": "string", "description": "Task UUID or taskNumber (e.g. TF-001)"},
+                                        "status": {"type": "string", "enum": ["backlog", "todo", "in_progress", "in_review", "done"], "description": "New target status"}
+                                    },
+                                    "required": ["task_id", "status"]
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Task status updated successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "object"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "/api/reminders": {
                 "post": {
                     "operationId": "triggerDailyReminders",
@@ -370,6 +404,16 @@ async def rest_create_task(request: Request):
     return JSONResponse(res)
 
 
+@mcp.custom_route("/api/tasks/status", methods=["POST", "PATCH"])
+async def rest_update_task_status(request: Request):
+    body = await request.json()
+    res = await update_task_status(
+        task_id=body.get("task_id", ""),
+        new_status=body.get("status", "")
+    )
+    return JSONResponse(res)
+
+
 @mcp.custom_route("/api/summary", methods=["GET"])
 async def rest_get_summary(request: Request):
     summary = await get_workspace_summary()
@@ -383,22 +427,34 @@ async def rest_trigger_reminders(request: Request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Server Lifecycle & Entrypoint
+# ASGI Application (Exported for Vercel Serverless & Production ASGI Servers)
 # ─────────────────────────────────────────────────────────────────────────────
+app = mcp.streamable_http_app()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone Server Entrypoint
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    transport = "sse"
+    transport = "streamable-http"
     if "--stdio" in sys.argv:
         transport = "stdio"
+    elif "--sse" in sys.argv:
+        transport = "sse"
 
     print(f"[STARTUP] Starting {config.MCP_SERVER_NAME} using transport: {transport}...")
     
+    # Standalone mode can run APScheduler
     try:
         scheduler.start_scheduler()
     except Exception as e:
         print(f"[WARN] Scheduler startup note: {e}")
 
-    if transport == "sse":
+    if transport == "streamable-http":
+        print(f"[READY] MCP Streamable HTTP endpoint: http://{config.HOST}:{config.PORT}/mcp")
+        print(f"[READY] ChatGPT OpenAPI Spec: http://{config.HOST}:{config.PORT}/openapi.json")
+        mcp.run(transport="streamable-http")
+    elif transport == "sse":
         print(f"[READY] MCP SSE endpoint available at: http://{config.HOST}:{config.PORT}/sse")
         print(f"[READY] ChatGPT OpenAPI Spec: http://{config.HOST}:{config.PORT}/openapi.json")
         mcp.run(transport="sse")

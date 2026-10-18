@@ -1,4 +1,4 @@
-﻿# TaskFlow MCP Server
+# TaskFlow MCP Server
 
 Industry-standard, standalone Model Context Protocol (MCP) server for TaskFlow built with Python 3.11, Anthropic FastMCP, Docker, and Neon PostgreSQL.
 
@@ -98,13 +98,45 @@ External AI (ChatGPT / Claude / Cursor)
 }
 ```
 
-### 2. ChatGPT (Custom GPT Action)
-1. Expose `localhost:8000` via `ngrok http 8000` or deploy to your VPS.
-2. Add your server endpoint URL `https://your-domain.com/sse` in Custom GPT Actions.
+### 2. ChatGPT (Custom GPT Actions)
+OpenAI Custom GPTs connect via standard OpenAPI REST schemas:
+1. Copy your OpenAPI schema URL: `https://your-domain.vercel.app/openapi.json`
+2. In ChatGPT GPT Builder -> **Configure** -> **Actions** -> **Create new action**.
+3. Click **Import from URL** and paste `https://your-domain.vercel.app/openapi.json`.
+4. ChatGPT will automatically discover and generate actions for:
+   * `listTasks`: `GET /api/tasks`
+   * `createTask`: `POST /api/tasks`
+   * `updateTaskStatus`: `POST /api/tasks/status`
+   * `getWorkspaceSummary`: `GET /api/summary`
+   * `triggerDailyReminders`: `POST /api/reminders`
 
 ---
 
-## 🌐 Deploying to a Production VPS
+## ⚡ Deploying to Vercel (Serverless)
+
+This server is pre-configured with **Streamable HTTP** (`stateless_http=True`) and standard ASGI routes for zero-configuration Vercel deployment:
+
+1. **Push your code to GitHub**:
+   ```bash
+   git add .
+   git commit -m "Convert MCP server to Streamable HTTP and Vercel ASGI"
+   git push origin main
+   ```
+2. **Import into Vercel**:
+   * Go to [vercel.com/new](https://vercel.com/new).
+   * Select your `taskflow-mcp-server` repository.
+   * Add the following **Environment Variables**:
+     * `DATABASE_URL`: Your Neon PostgreSQL connection string.
+     * `MCP_SERVER_NAME`: `taskflow-mcp-server`
+3. **Deploy**:
+   * Vercel will install dependencies from `requirements.txt` and automatically serve `api/index.py` via `vercel.json`.
+   * MCP Streamable HTTP endpoint: `https://your-project.vercel.app/mcp`
+   * OpenAI OpenAPI Specification: `https://your-project.vercel.app/openapi.json`
+   * Daily standup reminder cron: configured automatically via `vercel.json` (`0 9 * * *`).
+
+---
+
+## 🌐 Alternative: Deploying to a Production VPS (Docker)
 
 1. SSH into your VPS (Ubuntu 22.04+):
    ```bash
@@ -116,8 +148,7 @@ External AI (ChatGPT / Claude / Cursor)
    cd taskflow-mcp-server
    ```
 3. Create `.env` with your Neon `DATABASE_URL`.
-4. Run with Docker Compose in detached mode:
+4. Run with Docker Compose:
    ```bash
    docker compose up -d
    ```
-5. Set up an Nginx reverse proxy with SSL (`certbot`) to expose `https://mcp.yourdomain.com`.

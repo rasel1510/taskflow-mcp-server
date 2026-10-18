@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import asyncio
 import uuid
 from apscheduler.schedulers.asyncio import AsyncIOScheduler

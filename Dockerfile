@@ -1,4 +1,4 @@
-﻿# Lightweight Python 3.11 Image
+# Lightweight Python 3.11 Image
 FROM python:3.11-slim
 
 # Set environment variables

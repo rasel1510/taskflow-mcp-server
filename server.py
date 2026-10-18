@@ -1,7 +1,10 @@
 ﻿import sys
 import uuid
 import datetime
+import json
 from typing import Optional, List, Dict, Any
+from starlette.responses import JSONResponse, HTMLResponse
+from starlette.requests import Request
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -21,7 +24,7 @@ mcp = FastMCP(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MCP Tools (Callable by ChatGPT, Claude, Cursor, etc.)
+# MCP Tools (Callable by Claude Desktop, Cursor, and internal agents)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -89,24 +92,20 @@ async def create_task(
     """
     task_id = f"task_{uuid.uuid4().hex[:16]}"
     
-    # Compute next task number (TF-001 format)
     count = await db.fetch_val('SELECT COUNT(*) FROM "Task";')
     task_number = f"TF-{(count or 0) + 1:03d}"
     
-    # Resolve assignee if email provided
     assignee_id = None
     if assignee_email:
         user_row = await db.fetch_one('SELECT id FROM "User" WHERE email = $1;', assignee_email)
         if user_row:
             assignee_id = user_row["id"]
             
-    # Resolve project if not provided
     if not project_id:
         proj_row = await db.fetch_one('SELECT id FROM "Project" ORDER BY "createdAt" ASC LIMIT 1;')
         if proj_row:
             project_id = proj_row["id"]
             
-    # Parse due date
     parsed_due_date = None
     if due_date:
         try:
@@ -139,10 +138,7 @@ async def create_task(
 
 @mcp.tool()
 async def update_task_status(task_id: str, new_status: str) -> Dict[str, Any]:
-    """
-    Update the status of a task by ID or taskNumber (e.g. 'TF-001').
-    new_status: 'backlog', 'todo', 'in_progress', 'in_review', 'done'
-    """
+    """Update the status of a task by ID or taskNumber (e.g. 'TF-001')."""
     query = """
     UPDATE "Task"
     SET status = $1::"Status", "updatedAt" = NOW()
@@ -157,9 +153,7 @@ async def update_task_status(task_id: str, new_status: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def get_workspace_summary() -> Dict[str, Any]:
-    """
-    Get executive workspace metrics: total tasks, completed, in-progress, overdue count, and active projects.
-    """
+    """Get executive workspace metrics: total tasks, completed, in-progress, overdue count."""
     tasks_summary = await db.fetch_one("""
         SELECT 
             COUNT(*) as total_tasks,
@@ -168,10 +162,8 @@ async def get_workspace_summary() -> Dict[str, Any]:
             COUNT(*) FILTER (WHERE status::text != 'done' AND "dueDate" < CURRENT_DATE) as overdue_tasks
         FROM "Task";
     """)
-    
     projects_count = await db.fetch_val('SELECT COUNT(*) FROM "Project";')
     users_count = await db.fetch_val('SELECT COUNT(*) FROM "User";')
-    
     return {
         "metrics": dict(tasks_summary) if tasks_summary else {},
         "total_projects": projects_count or 0,
@@ -181,54 +173,213 @@ async def get_workspace_summary() -> Dict[str, Any]:
 
 @mcp.tool()
 async def trigger_daily_reminder_notifications() -> Dict[str, Any]:
-    """
-    Manually triggers the daily reminder notification check.
-    Queries incomplete tasks for all users and adds notification records directly into TaskFlow's Notification table.
-    """
+    """Manually triggers the daily reminder notification check."""
     return await scheduler.dispatch_daily_task_reminders()
 
 
-@mcp.tool()
-async def list_projects() -> List[Dict[str, Any]]:
-    """
-    List all active projects in the workspace with progress, health, and task counts.
-    """
-    query = """
-    SELECT 
-        p.id,
-        p.name,
-        p.description,
-        p.health::text as health,
-        p.progress,
-        COUNT(t.id) as total_tasks,
-        COUNT(t.id) FILTER (WHERE t.status::text = 'done') as done_tasks
-    FROM "Project" p
-    LEFT JOIN "Task" t ON t."projectId" = p.id
-    GROUP BY p.id
-    ORDER BY p."createdAt" DESC;
-    """
-    return await db.fetch_all(query)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# MCP Prompts & Resources
+# REST Endpoints for ChatGPT Custom GPT Actions & Browser Dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 
-@mcp.resource("taskflow://workspace/summary")
-async def workspace_summary_resource() -> str:
-    """Live JSON resource of current workspace statistics."""
+@mcp.custom_route("/", methods=["GET"])
+async def root_dashboard(request: Request):
+    """Clean browser landing page confirming server status."""
     summary = await get_workspace_summary()
-    import json
-    return json.dumps(summary, indent=2)
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>TaskFlow MCP Server</title>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0F172A; color: #F8FAFC; margin: 0; padding: 40px 20px; display: flex; justify-content: center; }}
+            .card {{ background: #1E293B; border: 1px solid #334155; border-radius: 16px; padding: 32px; max-width: 600px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }}
+            h1 {{ margin-top: 0; font-size: 24px; color: #38BDF8; display: flex; align-items: center; gap: 10px; }}
+            .badge {{ display: inline-block; background: #059669; color: white; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; }}
+            .metric {{ background: #0F172A; border-radius: 10px; padding: 16px; margin-top: 16px; }}
+            .endpoints {{ margin-top: 24px; font-size: 13px; color: #94A3B8; }}
+            code {{ background: #334155; padding: 3px 6px; border-radius: 4px; color: #38BDF8; font-family: monospace; }}
+            a {{ color: #38BDF8; text-decoration: none; }}
+            a:hover {{ text-decoration: underline; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>TaskFlow MCP Server <span class="badge">ONLINE</span></h1>
+            <p style="color: #94A3B8; font-size: 14px;">Anthropic Model Context Protocol & ChatGPT Actions Bridge</p>
+            
+            <div class="metric">
+                <div style="font-size: 12px; color: #94A3B8; text-transform: uppercase; font-weight: 600;">Neon Database Connected</div>
+                <div style="font-size: 20px; font-weight: bold; margin-top: 6px;">
+                    {summary.get('metrics', {}).get('total_tasks', 0)} Tasks | {summary.get('total_projects', 0)} Projects | {summary.get('team_members', 0)} Team Members
+                </div>
+            </div>
+
+            <div class="endpoints">
+                <p><strong>Endpoints:</strong></p>
+                <ul>
+                    <li>Claude Desktop / Native MCP: <code>/sse</code></li>
+                    <li>ChatGPT Action Schema: <a href="/openapi.json"><code>/openapi.json</code></a></li>
+                    <li>Tasks API: <a href="/api/tasks"><code>/api/tasks</code></a></li>
+                    <li>Summary API: <a href="/api/summary"><code>/api/summary</code></a></li>
+                </ul>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
 
-@mcp.prompt()
-def daily_standup() -> str:
-    """Generates a prompt for summarizing the user's daily standup and priority blockers."""
-    return (
-        "Please inspect my current workspace tasks using list_tasks, identify overdue "
-        "and in-progress tasks, and generate a crisp 3-bullet daily standup summary."
+@mcp.custom_route("/openapi.json", methods=["GET"])
+async def openapi_schema(request: Request):
+    """Dynamic OpenAPI 3.0 schema for ChatGPT Custom GPT Actions."""
+    base_url = str(request.base_url).rstrip("/")
+    schema = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "TaskFlow Workspace API",
+            "description": "API for querying, creating, and updating TaskFlow workspace tasks and metrics.",
+            "version": "1.0.0"
+        },
+        "servers": [
+            {"url": base_url}
+        ],
+        "paths": {
+            "/api/tasks": {
+                "get": {
+                    "operationId": "listTasks",
+                    "summary": "List tasks from TaskFlow workspace",
+                    "description": "Retrieve tasks filtered by status (todo, in_progress, done) or priority (low, medium, high, urgent).",
+                    "parameters": [
+                        {
+                            "name": "status",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string", "enum": ["backlog", "todo", "in_progress", "in_review", "done"]},
+                            "description": "Filter tasks by status"
+                        },
+                        {
+                            "name": "priority",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string", "enum": ["low", "medium", "high", "urgent"]},
+                            "description": "Filter tasks by priority"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "List of tasks returned successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "array", "items": {"type": "object"}}
+                                }
+                            }
+                        }
+                    }
+                },
+                "post": {
+                    "operationId": "createTask",
+                    "summary": "Create a new task",
+                    "description": "Add a task to the user workspace with optional title, description, priority, and due date.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string", "description": "Title of the task"},
+                                        "description": {"type": "string", "description": "Optional details"},
+                                        "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"], "default": "medium"},
+                                        "due_date": {"type": "string", "description": "YYYY-MM-DD"}
+                                    },
+                                    "required": ["title"]
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Task created successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "object"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/summary": {
+                "get": {
+                    "operationId": "getWorkspaceSummary",
+                    "summary": "Get workspace summary metrics",
+                    "description": "Returns counts of total tasks, completed, in-progress, and overdue items.",
+                    "responses": {
+                        "200": {
+                            "description": "Summary returned successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "object"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/reminders": {
+                "post": {
+                    "operationId": "triggerDailyReminders",
+                    "summary": "Trigger daily standup reminder notifications",
+                    "description": "Checks incomplete tasks and creates notifications for assignees in TaskFlow.",
+                    "responses": {
+                        "200": {
+                            "description": "Reminders dispatched",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"type": "object"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return JSONResponse(schema)
+
+
+@mcp.custom_route("/api/tasks", methods=["GET"])
+async def rest_list_tasks(request: Request):
+    status = request.query_params.get("status")
+    priority = request.query_params.get("priority")
+    tasks = await list_tasks(status=status, priority=priority)
+    return JSONResponse(tasks)
+
+
+@mcp.custom_route("/api/tasks", methods=["POST"])
+async def rest_create_task(request: Request):
+    body = await request.json()
+    res = await create_task(
+        title=body.get("title", ""),
+        description=body.get("description"),
+        priority=body.get("priority", "medium"),
+        due_date=body.get("due_date")
     )
+    return JSONResponse(res)
+
+
+@mcp.custom_route("/api/summary", methods=["GET"])
+async def rest_get_summary(request: Request):
+    summary = await get_workspace_summary()
+    return JSONResponse(summary)
+
+
+@mcp.custom_route("/api/reminders", methods=["POST"])
+async def rest_trigger_reminders(request: Request):
+    result = await trigger_daily_reminder_notifications()
+    return JSONResponse(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,7 +393,6 @@ if __name__ == "__main__":
 
     print(f"[STARTUP] Starting {config.MCP_SERVER_NAME} using transport: {transport}...")
     
-    # Start background daily reminder cron scheduler
     try:
         scheduler.start_scheduler()
     except Exception as e:
@@ -250,6 +400,7 @@ if __name__ == "__main__":
 
     if transport == "sse":
         print(f"[READY] MCP SSE endpoint available at: http://{config.HOST}:{config.PORT}/sse")
+        print(f"[READY] ChatGPT OpenAPI Spec: http://{config.HOST}:{config.PORT}/openapi.json")
         mcp.run(transport="sse")
     else:
         print("[READY] MCP STDIO stream active for Claude Desktop / Cursor integration.")
